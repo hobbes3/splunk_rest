@@ -44,34 +44,23 @@ class RetrySession(requests.Session):
     def post(self, url, **kwargs):
         return self.request("POST", url, **kwargs)
 
-    def request(self, method, url, headers=None, files=None, data=None, params=None, auth=None, cookies=None, hooks=None, json=None, timeout=None, **kwargs):
+    def request(self, method, url, headers=None, files=None, data=None, params=None, auth=None, cookies=None, hooks=None, json=None, timeout=None):
         t0 = time.time()
 
-        # Not sure how to do this part
-        #params = params if "params" in locals() else None
-        #headers = headers if "headers" in locals() else None
-        #auth = auth if "auth" in locals() else None
-        #data = data if "data" in locals() else None
-        #timeout = timeout if "timeout" in locals() else None
-
-        kwargs.setdefault("params")
-        kwargs.setdefault("headers")
-        kwargs.setdefault("auth")
-        kwargs.setdefault("data")
-        kwargs.setdefault("timeout")
-
-        meta = {
+        rid = {
             "request_id": token_urlsafe(16)
         }
 
-        sleep = uniform(SLEEP_START, SLEEP_END)
+        sleep = uniform(SPLUNK_MIN, SLEEP_MAX)
 
-        log("Sleeping for {} seconds.".format(sleep), extra=meta)
+        meta_sleep = rid.copy()
+        meta_sleep["sleep_sec"] = sleep
+        log("Sleeping.", extra=meta_sleep, stdout=False)
         time.sleep(sleep)
         r = None
 
         try:
-            meta_request = meta.copy()
+            meta_request = rid.copy()
             meta_request["request"] = {
                 "method": method,
                 "url": url,
@@ -87,16 +76,18 @@ class RetrySession(requests.Session):
             if timeout:
                 meta_request["request"]["timeout"] = timeout
 
-            log("Trying new request...".format(method, url), extra=meta_request)
+            log("Trying new request...", extra=meta_request, stdout=False)
             if data:
-                log("Sending {} bytes of data".format(len(data)), level="debug", extra=meta)
+                m = rid.copy()
+                m["request_data_bytes"] = len(data)
+                log("Got data in request.", level="debug", extra=m, stdout=False)
 
-            r = super().request(method, url, **kwargs)
+            r = super().request(method, url, headers=headers, files=files, data=data, params=params, auth=auth, cookies=cookies, hooks=hooks, json=json, timeout=timeout)
         except Exception:
             traceback.print_exc()
-            log("An exception occured!", level="exception", extra=meta)
+            log("An exception occured!", level="exception", extra=rid, stdout=False)
         else:
-            meta_response = meta.copy()
+            meta_response = rid.copy()
             meta_response["response"] = {
                 "status_code": r.status_code,
                 "reason": r.reason,
@@ -107,22 +98,25 @@ class RetrySession(requests.Session):
                 meta_response["response"]["text"] = r.text if len(r.text) <= TEXT_TRUNCATE else r.text[:TEXT_TRUNCATE]+" (truncated)..."
 
             if r.status_code == 200:
-                log("Eventually worked.", extra=meta_response)
+                log("Eventually worked.", extra=meta_response, stdout=False)
             else:
-                log("Eventually worked but with status code {}!".format(r.status_code), level="warning", extra=meta_response)
+                log("Eventually worked but with non-OK status code!", level="warning", extra=meta_response, stdout=False)
 
             if r.text:
-                log("Got {} bytes of data.".format(len(r.text)), level="debug", extra=meta)
+                m = rid.copy()
+                m["response_data_bytes"] = len(r.text)
+                log("Got data in response.", level="debug", extra=m, stdout=False)
             else:
-                log("Empty response!", level="warning", extra=meta)
+                log("Empty response!", level="warning", extra=rid, stdout=False)
         finally:
-            log("Took {} seconds.".format(time.time() - t0), extra=meta)
+            m = rid.copy()
+            m["request_sec"] = time.time() - t0
+            log("End.", extra=m, stdout=False)
             return r
 
-def log(msg, level="info", extra=None, stdout=False):
+def log(msg, level="info", extra=None, stdout=True):
     if extra is None:
         extra = {}
-
     extra["session_id"] = sid
 
     if level == "debug":
@@ -135,24 +129,24 @@ def log(msg, level="info", extra=None, stdout=False):
         logger.info(msg, extra=extra)
 
     if stdout:
-        print(msg, extra)
+        print(level.upper(), msg, extra)
 
 def rest_wrapped(func):
     def gracefully_exit():
         with lock:
-            log("INCOMPLETE.", level="warning", extra={"elapsed_sec": time.time() - start_time}, stdout=True)
+            log("INCOMPLETE.", level="warning", extra={"elapsed_sec": time.time() - start_time})
             os._exit(1)
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        log("START.", stdout=True)
+        log("START.")
 
         if not Path(bin_path / "settings.py").exists():
-            log("The config file, settings.py, doesn't exist! Please copy, edit, and rename default_settings.py to settings.py.", level="warning", stdout=True)
+            log("The config file, settings.py, doesn't exist! Please copy, edit, and rename default_settings.py to settings.py.", level="warning")
             os._exit(1)
 
         if DEBUG:
-            log("DEBUG on!", level="warning", stdout=True)
+            log("DEBUG on!", level="warning")
 
         print("Log file at {}.".format(log_file))
 
@@ -166,18 +160,18 @@ def rest_wrapped(func):
             pool.close()
             pool.join()
         except KeyboardInterrupt:
-            log("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...", level="warning", stdout=True)
+            log("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...", level="warning")
             pool.terminate()
             pool.join()
             gracefully_exit()
         except Exception:
             traceback.print_exc()
-            log("An exception occured!", level="exception")
+            log("An exception occured!", level="exception", stdout=False)
             pool.terminate()
             pool.join()
             gracefully_exit()
 
-        log("DONE.", extra={"elapsed_sec": time.time() - start_time}, stdout=True)
+        log("DONE.", extra={"elapsed_sec": time.time() - start_time})
 
     return wrapper
 
@@ -191,7 +185,7 @@ script_file = Path(filename).resolve()
 script_filename = script_file.stem
 bin_path = script_file.parents[0]
 # Save logs the Splunk directory to be picked up by `index=_internal`.
-log_file = Path(os.environ["SPLUNK_HOME"] + "/var/log/splunk/" + script_filename + ".log")
+log_file = Path(SPLUNK_HOME + "/var/log/splunk/" + script_filename + ".log")
 
 sid = token_urlsafe(8)
 
