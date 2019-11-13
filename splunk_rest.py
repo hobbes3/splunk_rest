@@ -44,7 +44,7 @@ class RetrySession(requests.Session):
     def post(self, url, **kwargs):
         return self.request("POST", url, **kwargs)
 
-    def request(self, method, url, headers=None, files=None, data=None, params=None, auth=None, cookies=None, hooks=None, json=None, timeout=None):
+    def request(self, method, url, **kwargs):
         t0 = time.time()
 
         rid = {
@@ -65,35 +65,51 @@ class RetrySession(requests.Session):
                 "method": method,
                 "url": url,
             }
-            if params:
-                meta_request["request"]["params"] = params
-            if headers:
-                meta_request["request"]["headers"] = headers
-            if auth:
-                meta_request["request"]["auth"] = auth
-            if data:
-                meta_request["request"]["data_size"] = len(data)
-                meta_request["request"]["data"] = data if len(data) <= TEXT_TRUNCATE else data[:TEXT_TRUNCATE]+" (truncated)..."
-            if timeout:
-                meta_request["request"]["timeout"] = timeout
+
+            for k, v in kwargs.items():
+                if k == "data":
+                    data_size = len(v)
+                    meta_request["request"]["data_size"] = data_size
+                    if data_size <= TEXT_TRUNCATE:
+                        meta_request["request"]["data"] = v
+                        meta_request["request"]["data_truncated"] = False
+                    else:
+                        meta_request["request"]["data"] = v[:TEXT_TRUNCATE]+" ..."
+                        meta_request["request"]["data_truncated"] = True
+                else:
+                    meta_request["request"][k] = v
 
             log("Request start.", extra=meta_request, stdout=False)
 
-            r = super().request(method, url, headers=headers, files=files, data=data, params=params, auth=auth, cookies=cookies, hooks=hooks, json=json, timeout=timeout)
+            r = super().request(method, url, **kwargs)
         except Exception:
             traceback.print_exc()
             log("An exception occured!", level="exception", extra=rid, stdout=False)
         else:
             meta_response = rid.copy()
             meta_response["response"] = {
+                "ok": r.ok,
+                "encoding": r.encoding,
+                "apparent_encoding": r.apparent_encoding,
                 "status_code": r.status_code,
                 "reason": r.reason,
                 "headers": dict(r.headers),
+                "links": r.links,
+                "elapsed": r.elapsed,
+                "is_redirect": r.is_redirect,
+                "is_permanent_redirect": r.is_permanent_redirect,
+                "url": r.url,
             }
 
             if r.text:
-                meta_response["response"]["data_size"] = len(r.text)
-                meta_response["response"]["data"] = r.text if len(r.text) <= TEXT_TRUNCATE else r.text[:TEXT_TRUNCATE]+" (truncated)..."
+                data_size = len(r.text)
+                meta_response["response"]["data_size"] = data_size
+                if data_size <= TEXT_TRUNCATE:
+                    meta_response["response"]["data"] = r.text
+                    meta_response["response"]["data_truncated"] = False
+                else:
+                    meta_response["response"]["data"] = r.text[:TEXT_TRUNCATE]+" ..."
+                    meta_response["response"]["data_truncated"] = True
             else:
                 log("Empty response received!", level="warning", extra=rid, stdout=False)
 
