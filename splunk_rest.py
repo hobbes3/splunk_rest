@@ -72,15 +72,12 @@ class RetrySession(requests.Session):
             if auth:
                 meta_request["request"]["auth"] = auth
             if data:
+                meta_request["request"]["data_size"] = len(data)
                 meta_request["request"]["data"] = data if len(data) <= TEXT_TRUNCATE else data[:TEXT_TRUNCATE]+" (truncated)..."
             if timeout:
                 meta_request["request"]["timeout"] = timeout
 
-            log("Trying new request...", extra=meta_request, stdout=False)
-            if data:
-                m = rid.copy()
-                m["request_data_bytes"] = len(data)
-                log("Got data in request.", level="debug", extra=m, stdout=False)
+            log("Request start.", extra=meta_request, stdout=False)
 
             r = super().request(method, url, headers=headers, files=files, data=data, params=params, auth=auth, cookies=cookies, hooks=hooks, json=json, timeout=timeout)
         except Exception:
@@ -95,23 +92,20 @@ class RetrySession(requests.Session):
             }
 
             if r.text:
-                meta_response["response"]["text"] = r.text if len(r.text) <= TEXT_TRUNCATE else r.text[:TEXT_TRUNCATE]+" (truncated)..."
+                meta_response["response"]["data_size"] = len(r.text)
+                meta_response["response"]["data"] = r.text if len(r.text) <= TEXT_TRUNCATE else r.text[:TEXT_TRUNCATE]+" (truncated)..."
+            else:
+                log("Empty response received!", level="warning", extra=rid, stdout=False)
 
             if r.status_code == 200:
-                log("Eventually worked.", extra=meta_response, stdout=False)
+                log("Response received.", extra=meta_response, stdout=False)
             else:
-                log("Eventually worked but with non-OK status code!", level="warning", extra=meta_response, stdout=False)
+                log("Response received but with non-OK status code!", level="warning", extra=meta_response, stdout=False)
 
-            if r.text:
-                m = rid.copy()
-                m["response_data_bytes"] = len(r.text)
-                log("Got data in response.", level="debug", extra=m, stdout=False)
-            else:
-                log("Empty response!", level="warning", extra=rid, stdout=False)
         finally:
             m = rid.copy()
-            m["request_sec"] = time.time() - t0
-            log("End.", extra=m, stdout=False)
+            m["request_elapsed_sec"] = time.time() - t0
+            log("Request end.", extra=m, stdout=False)
             return r
 
 def log(msg, level="info", extra=None, stdout=True):
@@ -134,12 +128,12 @@ def log(msg, level="info", extra=None, stdout=True):
 def rest_wrapped(func):
     def gracefully_exit():
         with lock:
-            log("INCOMPLETE.", level="warning", extra={"elapsed_sec": time.time() - start_time})
+            log("SCRIPT INCOMPLETE.", level="warning", extra={"script_elapsed_sec": time.time() - start_time})
             os._exit(1)
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        log("START.")
+        log("SCRIPT START.")
 
         if not Path(bin_path / "settings.py").exists():
             log("The config file, settings.py, doesn't exist! Please copy, edit, and rename default_settings.py to settings.py.", level="warning")
@@ -171,7 +165,7 @@ def rest_wrapped(func):
             pool.join()
             gracefully_exit()
 
-        log("DONE.", extra={"elapsed_sec": time.time() - start_time})
+        log("SCRIPT DONE.", extra={"script_elapsed_sec": time.time() - start_time})
 
     return wrapper
 
