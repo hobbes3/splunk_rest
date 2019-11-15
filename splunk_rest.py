@@ -33,53 +33,12 @@ def rest_wrapped(func):
                 logger.warning("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
                 os._exit(1)
 
-        # https://stackoverflow.com/a/57820456/1150923
-        def record_factory(*args, **kwargs):
-            record = old_factory(*args, **kwargs)
-            record.session_id = session_id
-            return record
-
         start_time = time()
-
-        # Save logs the Splunk directory to be picked up by `index=_internal`.
-        splunk_home = config["logging"]["splunk_home"]
-        log_file = Path(splunk_home + "/var/log/splunk/" + script_filename + ".log")
-
-        # Logging
-        old_factory = logging.getLogRecordFactory()
-        logging.setLogRecordFactory(record_factory)
-
-        json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
-
-        # Logging to a rotated file for Splunk
-        rotation_bytes = config["logging"]["rotation_mb"] * 1024 * 1024
-        rotation_limit = config["logging"]["rotation_limit"]
-        file_handler = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=rotation_limit)
-        file_handler.setFormatter(json_format)
-        file_handler.setLevel(logging.DEBUG)
-
-        # Logging to stdout for command line
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(json_format)
-        console_handler.setLevel(logging.INFO)
-
-        logger.setLevel(logging.DEBUG)
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-
-        # Command line arguments
-        arg_parser = ArgumentParser()
-        arg_parser.add_argument("-s", "--silent", help="suppresses stdout (for Splunk scripted inputs)", action="store_true")
-        script_args = arg_parser.parse_args()
-
-        if script_args.silent:
-            sys.stdout = StringIO()
 
         lock = Lock()
         threads = config["general"]["threads"]
         pool = Pool(threads)
 
-        print("Log file at {}.".format(log_file))
         logger.info("SCRIPT START.")
 
         if config["general"]["debug"]:
@@ -209,36 +168,99 @@ class RetrySession(requests.Session):
             logger.debug("Request end.", extra=meta_end)
             return r
 
-# https://stackoverflow.com/a/24837438/1150923
-def merge_dicts(dict1, dict2):
-    """ Recursively merges dict2 into dict1 """
-    if not isinstance(dict1, dict) or not isinstance(dict2, dict):
-        return dict2
-    for k in dict2:
-        if k in dict1:
-            dict1[k] = merge_dicts(dict1[k], dict2[k])
-        else:
-            dict1[k] = dict2[k]
-    return dict1
+def get_parent_file():
+    filename = inspect.stack()[1][1]
+    print(filename)
+    parent_file = Path(filename).resolve()
+
+    return parent_file
+
+def get_config():
+    # https://stackoverflow.com/a/24837438/1150923
+    def merge_dicts(dict1, dict2):
+        """ Recursively merges dict2 into dict1 """
+        if not isinstance(dict1, dict) or not isinstance(dict2, dict):
+            return dict2
+        for k in dict2:
+            if k in dict1:
+                dict1[k] = merge_dicts(dict1[k], dict2[k])
+            else:
+                dict1[k] = dict2[k]
+        return dict1
+
+    parent_file = get_parent_file()
+    app_bin_path = parent_file.parents[1]
+
+    toml_file_default = str(app_bin_path) + "/splunk_rest/config.toml"
+    toml_file_local = str(app_bin_path) + "/config.toml"
+
+    config_default = toml.load(toml_file_default)
+
+    if Path(toml_file_local).exists():
+        config_local = toml.load(toml_file_local)
+        # Merge default and local
+        config = merge_dicts(config_default, config_local)
+    else:
+        logger.warning("The local config file not found! The script will only use the default config file and will probably not properly.", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
+        config = config_default
+
+    return config
+
+def get_script_args():
+    # Command line arguments
+    arg_parser = ArgumentParser()
+    arg_parser.add_argument("-s", "--silent", help="suppresses stdout (for Splunk scripted inputs)", action="store_true")
+    script_args = arg_parser.parse_args()
+
+    return script_args
+
+def set_logger():
+    # https://stackoverflow.com/a/57820456/1150923
+    def record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        record.session_id = session_id
+        return record
+
+    parent_file = get_parent_file()
+    # parent_filename is without the file extension, ie without ".py".
+    parent_filename = parent_file.stem
+
+    # Save logs the Splunk directory to be picked up by `index=_internal`.
+    splunk_home = config["logging"]["splunk_home"]
+    log_file = Path(splunk_home + "/var/log/splunk/" + parent_filename + ".log")
+
+    print("Log file at {}.".format(log_file))
+
+    old_factory = logging.getLogRecordFactory()
+    logging.setLogRecordFactory(record_factory)
+
+    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
+
+    # Logging to a rotated file for Splunk
+    rotation_bytes = config["logging"]["rotation_mb"] * 1024 * 1024
+    rotation_limit = config["logging"]["rotation_limit"]
+    file_handler = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=rotation_limit)
+    file_handler.setFormatter(json_format)
+    file_handler.setLevel(logging.DEBUG)
+
+    # Logging to stdout for command line
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(json_format)
+    console_handler.setLevel(logging.INFO)
+
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    if not script_args.silent:
+        logger.addHandler(console_handler)
+
+    return logger
+
+session_id = token_urlsafe(8)
+config = get_config()
+script_args = get_script_args()
+
+if script_args.silent:
+    sys.stdout = StringIO()
 
 logger = logging.getLogger(__name__)
-session_id = token_urlsafe(8)
-
-filename = inspect.stack()[-1][1]
-script_file = Path(filename).resolve()
-script_filename = script_file.stem
-bin_path = script_file.parents[0]
-
-# Toml config files
-toml_file_default = str(bin_path) + "/splunk_rest/config.toml"
-toml_file_local = str(bin_path) + "/config.toml"
-
-config_default = toml.load(toml_file_default)
-
-if Path(toml_file_local).exists():
-	config_local = toml.load(toml_file_local)
-	# Merge default and local
-	config = merge_dicts(config_default, config_local)
-else:
-    logger.warning("The local config file doesn't exist!", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
-    config = config_default
+set_logger()
