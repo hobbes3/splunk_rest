@@ -169,8 +169,7 @@ class RetrySession(requests.Session):
             return r
 
 def get_parent_file():
-    filename = inspect.stack()[1][1]
-    print(filename)
+    filename = inspect.stack()[-1][1]
     parent_file = Path(filename).resolve()
 
     return parent_file
@@ -189,7 +188,7 @@ def get_config():
         return dict1
 
     parent_file = get_parent_file()
-    app_bin_path = parent_file.parents[1]
+    app_bin_path = parent_file.parents[0]
 
     toml_file_default = str(app_bin_path) + "/splunk_rest/config.toml"
     toml_file_local = str(app_bin_path) + "/config.toml"
