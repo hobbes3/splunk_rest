@@ -4,28 +4,110 @@
 import requests
 import os
 import sys
-import time
 import json
-import traceback
 import inspect
-import functools
 import argparse
+import toml
 import logging
-import logging.handlers
-from argparse import ArgumentParser
-from io import StringIO
+from logging.handlers import RotatingFileHandler
 from pythonjsonlogger import jsonlogger
+from functools import wraps
+from argparse import ArgumentParser
+from time import time, sleep
+from io import StringIO
 from random import uniform
+from tqdm import tqdm
+from pathlib import Path
+from secrets import token_urlsafe
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from requests.packages.urllib3.util.retry import Retry
-from tqdm import tqdm
 from multiprocessing import Lock
 from multiprocessing.dummy import Pool
-from pathlib import Path
-from secrets import token_urlsafe
 
-from settings import *
+def rest_wrapped(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        def gracefully_exit():
+            with lock:
+                logger.warning("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
+                os._exit(1)
+
+        # https://stackoverflow.com/a/57820456/1150923
+        def record_factory(*args, **kwargs):
+            record = old_factory(*args, **kwargs)
+            record.session_id = session_id
+            return record
+
+        start_time = time()
+
+        # Save logs the Splunk directory to be picked up by `index=_internal`.
+        splunk_home = config["logging"]["splunk_home"]
+        log_file = Path(splunk_home + "/var/log/splunk/" + script_filename + ".log")
+
+        # Logging
+        old_factory = logging.getLogRecordFactory()
+        logging.setLogRecordFactory(record_factory)
+
+        json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
+
+        # Logging to a rotated file for Splunk
+        rotation_bytes = config["logging"]["rotation_mb"] * 1024 * 1024
+        rotation_limit = config["logging"]["rotation_limit"]
+        file_handler = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=rotation_limit)
+        file_handler.setFormatter(json_format)
+        file_handler.setLevel(logging.DEBUG)
+
+        # Logging to stdout for command line
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(json_format)
+        console_handler.setLevel(logging.INFO)
+
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+
+        # Command line arguments
+        arg_parser = ArgumentParser()
+        arg_parser.add_argument("-s", "--silent", help="suppresses stdout (for Splunk scripted inputs)", action="store_true")
+        script_args = arg_parser.parse_args()
+
+        if script_args.silent:
+            sys.stdout = StringIO()
+
+        lock = Lock()
+        threads = config["general"]["threads"]
+        pool = Pool(threads)
+
+        print("Log file at {}.".format(log_file))
+        logger.info("SCRIPT START.")
+
+        if config["general"]["debug"]:
+            logger.warning("Debug is on!")
+
+        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+        try:
+            print("Press ctrl-c to cancel at any time.")
+
+            func(*args, **kwargs)
+
+            pool.close()
+            pool.join()
+        except KeyboardInterrupt:
+            log.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
+            pool.terminate()
+            pool.join()
+            gracefully_exit()
+        except Exception:
+            logger.exception("An exception occured!")
+            pool.terminate()
+            pool.join()
+            gracefully_exit()
+
+        logger.info("SCRIPT DONE.", extra={"script_elapsed_sec": time() - start_time})
+
+    return wrapper
 
 def retry_session(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504]):
     s = RetrySession()
@@ -45,22 +127,26 @@ class RetrySession(requests.Session):
         return self.request("POST", url, **kwargs)
 
     def request(self, method, url, **kwargs):
-        t0 = time.time()
+        request_start_time = time()
 
-        rid = {
+        request_id = {
             "request_id": token_urlsafe(16)
         }
 
-        sleep = uniform(SPLUNK_MIN, SLEEP_MAX)
+        sleep_min = config["requests"]["sleep_min"]
+        sleep_max = config["requests"]["sleep_max"]
+        sleep_sec = uniform(sleep_min, sleep_max)
 
-        meta_sleep = rid.copy()
-        meta_sleep["sleep_sec"] = sleep
-        log("Sleeping.", extra=meta_sleep, stdout=False)
-        time.sleep(sleep)
+        meta_sleep = request_id.copy()
+        meta_sleep["sleep_sec"] = sleep_sec
+        logger.debug("Sleeping.", extra=meta_sleep)
+        sleep(sleep_sec)
+
         r = None
+        text_truncate = config["requests"]["text_truncate"]
 
         try:
-            meta_request = rid.copy()
+            meta_request = request_id.copy()
             meta_request["request"] = {
                 "method": method,
                 "url": url,
@@ -70,23 +156,22 @@ class RetrySession(requests.Session):
                 if k == "data":
                     data_size = len(v)
                     meta_request["request"]["data_size"] = data_size
-                    if data_size <= TEXT_TRUNCATE:
+                    if data_size <= text_truncate:
                         meta_request["request"]["data"] = v
                         meta_request["request"]["data_truncated"] = False
                     else:
-                        meta_request["request"]["data"] = v[:TEXT_TRUNCATE]+" ..."
+                        meta_request["request"]["data"] = v[:text_truncate]+" ..."
                         meta_request["request"]["data_truncated"] = True
                 else:
                     meta_request["request"][k] = v
 
-            log("Request start.", extra=meta_request, stdout=False)
+            logger.debug("Request start.", extra=meta_request)
 
             r = super().request(method, url, **kwargs)
         except Exception:
-            traceback.print_exc()
-            log("An exception occured!", level="exception", extra=rid, stdout=False)
+            logger.exception("An exception occured!", extra=request_id)
         else:
-            meta_response = rid.copy()
+            meta_response = request_id.copy()
             meta_response["response"] = {
                 "ok": r.ok,
                 "encoding": r.encoding,
@@ -104,113 +189,56 @@ class RetrySession(requests.Session):
             if r.text:
                 data_size = len(r.text)
                 meta_response["response"]["data_size"] = data_size
-                if data_size <= TEXT_TRUNCATE:
+                if data_size <= text_truncate:
                     meta_response["response"]["data"] = r.text
                     meta_response["response"]["data_truncated"] = False
                 else:
-                    meta_response["response"]["data"] = r.text[:TEXT_TRUNCATE]+" ..."
+                    meta_response["response"]["data"] = r.text[:text_truncate]+" ..."
                     meta_response["response"]["data_truncated"] = True
             else:
-                log("Empty response received!", level="warning", extra=rid, stdout=False)
+                logger.warning("Empty response received!", extra=request_id)
 
             if r.status_code == 200:
-                log("Response received.", extra=meta_response, stdout=False)
+                logger.debug("Response received.", extra=meta_response)
             else:
-                log("Response received but with non-OK status code!", level="warning", extra=meta_response, stdout=False)
+                logger.warning("Response received but with non-OK status code!", extra=meta_response)
 
         finally:
-            m = rid.copy()
-            m["request_elapsed_sec"] = time.time() - t0
-            log("Request end.", extra=m, stdout=False)
+            meta_end = request_id.copy()
+            meta_end["request_elapsed_sec"] = time() - request_start_time
+            logger.debug("Request end.", extra=meta_end)
             return r
 
-def log(msg, level="info", extra=None, stdout=True):
-    if extra is None:
-        extra = {}
-    extra["session_id"] = sid
+# https://stackoverflow.com/a/24837438/1150923
+def merge_dicts(dict1, dict2):
+    """ Recursively merges dict2 into dict1 """
+    if not isinstance(dict1, dict) or not isinstance(dict2, dict):
+        return dict2
+    for k in dict2:
+        if k in dict1:
+            dict1[k] = merge_dicts(dict1[k], dict2[k])
+        else:
+            dict1[k] = dict2[k]
+    return dict1
 
-    if level == "debug":
-        logger.debug(msg, extra=extra)
-    elif level == "warning":
-        logger.warning(msg, extra=extra)
-    elif level == "exception":
-        logger.exception(msg, extra=extra)
-    else:
-        logger.info(msg, extra=extra)
-
-    if stdout:
-        print(level.upper(), msg, extra)
-
-def rest_wrapped(func):
-    def gracefully_exit():
-        with lock:
-            log("SCRIPT INCOMPLETE.", level="warning", extra={"script_elapsed_sec": time.time() - start_time})
-            os._exit(1)
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        log("SCRIPT START.")
-
-        if not Path(bin_path / "settings.py").exists():
-            log("The config file, settings.py, doesn't exist! Please copy, edit, and rename default_settings.py to settings.py.", level="warning")
-            os._exit(1)
-
-        if DEBUG:
-            log("DEBUG on!", level="warning")
-
-        print("Log file at {}.".format(log_file))
-
-        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-        try:
-            print("Press ctrl-c to cancel at any time.")
-
-            func(*args, **kwargs)
-
-            pool.close()
-            pool.join()
-        except KeyboardInterrupt:
-            log("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...", level="warning")
-            pool.terminate()
-            pool.join()
-            gracefully_exit()
-        except Exception:
-            traceback.print_exc()
-            log("An exception occured!", level="exception", stdout=False)
-            pool.terminate()
-            pool.join()
-            gracefully_exit()
-
-        log("SCRIPT DONE.", extra={"script_elapsed_sec": time.time() - start_time})
-
-    return wrapper
-
-# I know it's not best practice not to run code import time,
-# but I'm not sure how else to do this part.
-# Especially defining the some path strings and the logger.
-start_time = time.time()
+logger = logging.getLogger(__name__)
+session_id = token_urlsafe(8)
 
 filename = inspect.stack()[-1][1]
 script_file = Path(filename).resolve()
 script_filename = script_file.stem
 bin_path = script_file.parents[0]
-# Save logs the Splunk directory to be picked up by `index=_internal`.
-log_file = Path(SPLUNK_HOME + "/var/log/splunk/" + script_filename + ".log")
 
-sid = token_urlsafe(8)
+# Toml config files
+toml_file_default = str(bin_path) + "/splunk_rest/config.toml"
+toml_file_local = str(bin_path) + "/config.toml"
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=LOG_ROTATION_BYTES, backupCount=LOG_ROTATION_LIMIT)
-handler.setFormatter(jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (message)"))
-logger.addHandler(handler)
+config_default = toml.load(toml_file_default)
 
-parser = ArgumentParser()
-parser.add_argument("-s", "--silent", help="suppresses stdout (for Splunk scripted inputs)", action="store_true")
-args = parser.parse_args()
-
-if args.silent:
-    sys.stdout = StringIO()
-
-lock = Lock()
-pool = Pool(THREADS)
+if Path(toml_file_local).exists():
+	config_local = toml.load(toml_file_local)
+	# Merge default and local
+	config = merge_dicts(config_default, config_local)
+else:
+    logger.warning("The local config file doesn't exist!", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
+    config = config_default
