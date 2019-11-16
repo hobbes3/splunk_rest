@@ -16,7 +16,6 @@ from argparse import ArgumentParser
 from time import time, sleep
 from io import StringIO
 from random import uniform
-from tqdm import tqdm
 from pathlib import Path
 from secrets import token_urlsafe
 from requests.adapters import HTTPAdapter
@@ -36,8 +35,6 @@ def rest_wrapped(func):
         start_time = time()
 
         lock = Lock()
-        threads = config["general"]["threads"]
-        pool = Pool(threads)
 
         logger.info("SCRIPT START.")
 
@@ -54,7 +51,7 @@ def rest_wrapped(func):
             pool.close()
             pool.join()
         except KeyboardInterrupt:
-            log.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
+            logger.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
             pool.terminate()
             pool.join()
             gracefully_exit()
@@ -263,3 +260,5 @@ if script_args.silent:
 
 logger = logging.getLogger(__name__)
 set_logger()
+
+pool = Pool(config["general"]["threads"])
