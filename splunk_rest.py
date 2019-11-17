@@ -247,7 +247,7 @@ def configure_logger():
     file_handler.setLevel(logging.DEBUG)
 
     # Logging to stdout for command line.
-    # Only log INFO and ERROR to stdout.
+    # Only log INFO, ERROR, and CRITICAL to stdout.
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(json_format)
     console_handler.setLevel(logging.DEBUG)
