@@ -29,17 +29,15 @@ def rest_wrapped(func):
     def wrapper(*args, **kwargs):
         def gracefully_exit():
             with lock:
-                logger.warning("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
+                logger.error("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
                 os._exit(1)
-
-        start_time = time()
 
         lock = Lock()
 
         logger.info("SCRIPT START.")
 
         if config["general"]["debug"]:
-            logger.warning("Debug is on!")
+            logger.info("Debug is on!")
 
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -197,7 +195,7 @@ def get_config():
         # Merge default and local
         config = merge_dicts(config_default, config_local)
     else:
-        logger.warning("The local config file not found! The script will only use the default config file and will probably not properly.", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
+        logger.error("The local config file not found! The script will only use the default config file and will probably not run properly.", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
         config = config_default
 
     return config
@@ -210,12 +208,20 @@ def get_script_args():
 
     return script_args
 
-def set_logger():
+def configure_logger():
     # https://stackoverflow.com/a/57820456/1150923
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
         record.session_id = session_id
         return record
+
+    # https://stackoverflow.com/a/8163115/1150923
+    class LogLevelFilter():
+        def __init__(self, level_list):
+            self.level_list = level_list
+
+        def filter(self, logRecord):
+            return logRecord.levelno in self.level_list
 
     parent_file = get_parent_file()
     # parent_filename is without the file extension, ie without ".py".
@@ -232,26 +238,28 @@ def set_logger():
 
     json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
 
-    # Logging to a rotated file for Splunk
+    # Logging to rotated files for Splunk.
+    # Log everything to the files.
     rotation_bytes = config["logging"]["rotation_mb"] * 1024 * 1024
     rotation_limit = config["logging"]["rotation_limit"]
     file_handler = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=rotation_limit)
     file_handler.setFormatter(json_format)
     file_handler.setLevel(logging.DEBUG)
 
-    # Logging to stdout for command line
+    # Logging to stdout for command line.
+    # Only log INFO and ERROR to stdout.
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(json_format)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.addFilter(LogLevelFilter([logging.INFO, logging.ERROR, logging.CRITICAL]))
 
     logger.setLevel(logging.DEBUG)
     logger.addHandler(file_handler)
     if not script_args.silent:
         logger.addHandler(console_handler)
 
-    return logger
-
 session_id = token_urlsafe(8)
+start_time = time()
 config = get_config()
 script_args = get_script_args()
 
@@ -259,6 +267,6 @@ if script_args.silent:
     sys.stdout = StringIO()
 
 logger = logging.getLogger(__name__)
-set_logger()
+configure_logger()
 
 pool = Pool(config["general"]["threads"])
