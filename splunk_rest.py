@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pythonjsonlogger import jsonlogger
 from functools import wraps
+from tqdm import tqdm
 from argparse import ArgumentParser
 from time import time, sleep
 from io import StringIO
@@ -32,17 +33,16 @@ def rest_wrapped(func):
                 logger.error("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
                 os._exit(1)
 
-        lock = Lock()
-
-        logger.info("SCRIPT START.")
-
-        if config["general"]["debug"]:
-            logger.info("Debug is on!")
-
-        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
         try:
             print("Press ctrl-c to cancel at any time.")
+            logger.info("SCRIPT START.")
+
+            lock = Lock()
+
+            if config["general"]["debug"]:
+                logger.info("Debug is on!")
+
+            requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
             func(*args, **kwargs)
 
@@ -163,6 +163,10 @@ class RetrySession(requests.Session):
             logger.debug("Request end.", extra=meta_end)
             return r
 
+def multiprocess(func, arg_list):
+    for _ in tqdm(pool.imap_unordered(func, arg_list), total=len(arg_list), disable=script_args.silent):
+        pass
+
 def get_parent_file():
     filename = inspect.stack()[-1][1]
     parent_file = Path(filename).resolve()
@@ -237,6 +241,7 @@ def configure_logger():
     logging.setLogRecordFactory(record_factory)
 
     json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
+    std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
     # Log everything to the files.
@@ -249,7 +254,7 @@ def configure_logger():
     # Logging to stdout for command line.
     # Only log INFO, ERROR, and CRITICAL to stdout.
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(json_format)
+    console_handler.setFormatter(std_format)
     console_handler.setLevel(logging.DEBUG)
     console_handler.addFilter(LogLevelFilter([logging.INFO, logging.ERROR, logging.CRITICAL]))
 
