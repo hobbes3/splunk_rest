@@ -84,6 +84,9 @@ class RetrySession(requests.Session):
     def post(self, url, **kwargs):
         return self.request("POST", url, **kwargs)
 
+    def put(self, url, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
     def request(self, method, url, **kwargs):
         request_start_time = time()
 
