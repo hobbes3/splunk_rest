@@ -74,6 +74,10 @@ def retry_session(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 50
     return s
 
 class RetrySession(requests.Session):
+    def __init__(self):
+        super().__init__()
+        self.request_id = token_urlsafe(16)
+
     def get(self, url, **kwargs):
         return self.request("GET", url, **kwargs)
 
@@ -83,25 +87,27 @@ class RetrySession(requests.Session):
     def request(self, method, url, **kwargs):
         request_start_time = time()
 
-        request_id = {
-            "request_id": token_urlsafe(16)
-        }
+        request_id = token_urlsafe(16)
 
         sleep_min = config["requests"]["sleep_min"]
         sleep_max = config["requests"]["sleep_max"]
         sleep_sec = uniform(sleep_min, sleep_max)
 
-        meta_sleep = request_id.copy()
-        meta_sleep["sleep_sec"] = sleep_sec
-        logger.debug("Sleeping.", extra=meta_sleep)
+        meta = {
+            "request_id": request_id,
+        }
+
+        m = meta.copy()
+        m["sleep_sec"] = sleep_sec
+        logger.debug("Sleeping.", extra=m)
         sleep(sleep_sec)
 
-        r = None
         text_truncate = config["requests"]["text_truncate"]
 
+        r = None
         try:
-            meta_request = request_id.copy()
-            meta_request["request"] = {
+            m = meta.copy()
+            m["request"] = {
                 "method": method,
                 "url": url,
             }
@@ -109,24 +115,24 @@ class RetrySession(requests.Session):
             for k, v in kwargs.items():
                 if k == "data":
                     data_size = len(v)
-                    meta_request["request"]["data_size"] = data_size
+                    m["request"]["data_size"] = data_size
                     if data_size <= text_truncate:
-                        meta_request["request"]["data"] = v
-                        meta_request["request"]["data_truncated"] = False
+                        m["request"]["data"] = v
+                        m["request"]["data_truncated"] = False
                     else:
-                        meta_request["request"]["data"] = v[:text_truncate]+" ..."
-                        meta_request["request"]["data_truncated"] = True
+                        m["request"]["data"] = v[:text_truncate]+" ..."
+                        m["request"]["data_truncated"] = True
                 else:
-                    meta_request["request"][k] = v
+                    m["request"][k] = v
 
-            logger.debug("Request start.", extra=meta_request)
+            logger.debug("Request start.", extra=m)
 
             r = super().request(method, url, **kwargs)
         except Exception:
-            logger.exception("An exception occured!", extra=request_id)
+            logger.exception("An exception occured!", extra=meta)
         else:
-            meta_response = request_id.copy()
-            meta_response["response"] = {
+            m = meta.copy()
+            m["response"] = {
                 "ok": r.ok,
                 "encoding": r.encoding,
                 "apparent_encoding": r.apparent_encoding,
@@ -150,17 +156,23 @@ class RetrySession(requests.Session):
                     meta_response["response"]["data"] = r.text[:text_truncate]+" ..."
                     meta_response["response"]["data_truncated"] = True
             else:
-                logger.warning("Empty response received!", extra=request_id)
+                logger.warning("Empty response received!", extra=m)
 
             if r.status_code == 200:
-                logger.debug("Response received.", extra=meta_response)
+                logger.debug("Response received.", extra=m)
             else:
-                logger.warning("Response received but with non-OK status code!", extra=meta_response)
+                logger.warning("Response received but with non-OK status code!", extra=m)
 
         finally:
-            meta_end = request_id.copy()
-            meta_end["request_elapsed_sec"] = time() - request_start_time
-            logger.debug("Request end.", extra=meta_end)
+            m = meta.copy()
+            m["request_elapsed_sec"] = time() - request_start_time
+            logger.debug("Request end.", extra=m)
+            if r:
+                r.request_id = request_id
+            else:
+                r = {
+                    "request_id": request_id
+                }
             return r
 
 def multiprocess(func, arg_list):
@@ -240,7 +252,7 @@ def configure_logger():
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
 
-    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (message)")
+    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (pathname) (message)")
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
