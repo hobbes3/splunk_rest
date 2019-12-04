@@ -275,6 +275,7 @@ def configure_logger():
 session_id = token_urlsafe(8)
 start_time = time()
 config = get_config()
+debug = config["general"]["debug"]
 script_args = get_script_args()
 
 if script_args.silent:
