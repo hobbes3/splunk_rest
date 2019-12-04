@@ -53,8 +53,8 @@ def rest_wrapped(func):
             pool.terminate()
             pool.join()
             gracefully_exit()
-        except Exception:
-            logger.exception("An exception occured!")
+        except:
+            logger.exception("")
             pool.terminate()
             pool.join()
             gracefully_exit()
@@ -66,18 +66,14 @@ def rest_wrapped(func):
 def retry_session(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504]):
     s = RetrySession()
     s.verify = False
-    retries = Retry(total=total, backoff_factor=backoff_factor, status_forcelist=status_forcelist, method_whitelist=frozenset(['GET', 'POST']))
+    retries = Retry(total=total, backoff_factor=backoff_factor, status_forcelist=status_forcelist, method_whitelist=frozenset(["GET", "POST", "PUT"]))
     adapter = HTTPAdapter(max_retries=retries)
-    s.mount('http://', adapter)
-    s.mount('https://', adapter)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
 
     return s
 
 class RetrySession(requests.Session):
-    def __init__(self):
-        super().__init__()
-        self.request_id = token_urlsafe(16)
-
     def get(self, url, **kwargs):
         return self.request("GET", url, **kwargs)
 
@@ -107,7 +103,9 @@ class RetrySession(requests.Session):
 
         text_truncate = config["requests"]["text_truncate"]
 
-        r = None
+        # https://stackoverflow.com/a/19476841/1150923
+        # Create an empty class to do r.request_id later even if the request failed.
+        r = type('', (), {})()
         try:
             m = meta.copy()
             m["request"] = {
@@ -131,8 +129,8 @@ class RetrySession(requests.Session):
             logger.debug("Request start.", extra=m)
 
             r = super().request(method, url, **kwargs)
-        except Exception:
-            logger.exception("An exception occured!", extra=meta)
+        except:
+            logger.exception("", extra=meta)
         else:
             m = meta.copy()
             m["response"] = {
@@ -149,7 +147,7 @@ class RetrySession(requests.Session):
                 "url": r.url,
             }
 
-            if r.text:
+            if hasattr(r, "text"):
                 data_size = len(r.text)
                 meta_response["response"]["data_size"] = data_size
                 if data_size <= text_truncate:
@@ -170,12 +168,8 @@ class RetrySession(requests.Session):
             m = meta.copy()
             m["request_elapsed_sec"] = time() - request_start_time
             logger.debug("Request end.", extra=m)
-            if r:
-                r.request_id = request_id
-            else:
-                r = {
-                    "request_id": request_id
-                }
+            r.request_id = request_id
+
             return r
 
 def multiprocess(func, arg_list):
@@ -259,7 +253,7 @@ def configure_logger():
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
-    # Log everything to the files.
+    # Log every level to files.
     rotation_bytes = config["logging"]["rotation_mb"] * 1024 * 1024
     rotation_limit = config["logging"]["rotation_limit"]
     file_handler = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=rotation_limit)
@@ -267,7 +261,7 @@ def configure_logger():
     file_handler.setLevel(logging.DEBUG)
 
     # Logging to stdout for command line.
-    # Only log INFO, ERROR, and CRITICAL to stdout.
+    # Log only INFO, ERROR, and CRITICAL levels to stdout.
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(std_format)
     console_handler.setLevel(logging.DEBUG)
