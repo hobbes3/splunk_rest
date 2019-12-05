@@ -28,38 +28,33 @@ from multiprocessing.dummy import Pool
 def rest_wrapped(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        def gracefully_exit():
-            with lock:
-                logger.error("SCRIPT INCOMPLETE.", extra={"script_elapsed_sec": time() - start_time})
-                os._exit(1)
-
         try:
             print("Press ctrl-c to cancel at any time.")
-            logger.info("SCRIPT START.")
+            logger.info("Script start.")
 
             lock = Lock()
 
-            if config["general"]["debug"]:
-                logger.info("Debug is on!")
+            if partial_script_args.test:
+                logger.info("Test mode is on!")
+            if partial_script_args.sample:
+                logger.info("Sample mode is on!")
 
             requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
             func(*args, **kwargs)
 
             pool.close()
-            pool.join()
         except KeyboardInterrupt:
             logger.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
             pool.terminate()
-            pool.join()
-            gracefully_exit()
-        except:
-            logger.exception("")
-            pool.terminate()
-            pool.join()
-            gracefully_exit()
 
-        logger.info("SCRIPT DONE.", extra={"script_elapsed_sec": time() - start_time})
+            with lock:
+                logger.error("Script incomplete!", extra={"script_elapsed_sec": time() - start_time})
+                os._exit(1)
+        finally:
+            pool.join()
+
+        logger.info("Script done!", extra={"script_elapsed_sec": time() - start_time})
 
     return wrapper
 
@@ -96,18 +91,16 @@ class RetrySession(requests.Session):
             "request_id": request_id,
         }
 
-        m = meta.copy()
-        m["sleep_sec"] = sleep_sec
-        logger.debug("Sleeping.", extra=m)
         sleep(sleep_sec)
 
         text_truncate = config["requests"]["text_truncate"]
 
         # https://stackoverflow.com/a/19476841/1150923
         # Create an empty class to do r.request_id later even if the request failed.
-        r = type('', (), {})()
+        r = type("", (), {})()
         try:
             m = meta.copy()
+            m["sleep_sec"] = sleep_sec
             m["request"] = {
                 "method": method,
                 "url": url,
@@ -130,9 +123,10 @@ class RetrySession(requests.Session):
 
             r = super().request(method, url, **kwargs)
         except:
-            logger.exception("", extra=meta)
-        else:
+            logger.warning("", exc_info=True, extra=meta)
+        finally:
             m = meta.copy()
+            m["request_elapsed_sec"] = time() - request_start_time
             m["response"] = {
                 "ok": r.ok,
                 "encoding": r.encoding,
@@ -149,13 +143,13 @@ class RetrySession(requests.Session):
 
             if hasattr(r, "text"):
                 data_size = len(r.text)
-                meta_response["response"]["data_size"] = data_size
+                m["response"]["data_size"] = data_size
                 if data_size <= text_truncate:
-                    meta_response["response"]["data"] = r.text
-                    meta_response["response"]["data_truncated"] = False
+                    m["response"]["data"] = r.text
+                    m["response"]["data_truncated"] = False
                 else:
-                    meta_response["response"]["data"] = r.text[:text_truncate]+" ..."
-                    meta_response["response"]["data_truncated"] = True
+                    m["response"]["data"] = r.text[:text_truncate]+" ..."
+                    m["response"]["data_truncated"] = True
             else:
                 logger.warning("Empty response received!", extra=m)
 
@@ -164,16 +158,12 @@ class RetrySession(requests.Session):
             else:
                 logger.warning("Response received but with non-OK status code!", extra=m)
 
-        finally:
-            m = meta.copy()
-            m["request_elapsed_sec"] = time() - request_start_time
-            logger.debug("Request end.", extra=m)
             r.request_id = request_id
 
             return r
 
 def multiprocess(func, arg_list):
-    for _ in tqdm(pool.imap_unordered(func, arg_list), total=len(arg_list), disable=script_args.silent):
+    for _ in tqdm(pool.imap_unordered(func, arg_list), total=len(arg_list), disable=partial_script_args.silent):
         pass
 
 def get_parent_file():
@@ -205,7 +195,7 @@ def get_config():
 
     if Path(toml_file_local).exists():
         config_local = toml.load(toml_file_local)
-        # Merge default and local
+        # Merge default and local. Local overrides default.
         config = merge_dicts(config_default, config_local)
     else:
         logger.error("The local config file not found! The script will only use the default config file and will probably not run properly.", extra={"toml_file_local": toml_file_local, "toml_file_default": toml_file_default})
@@ -214,12 +204,14 @@ def get_config():
     return config
 
 def get_script_args():
-    # Command line arguments
-    arg_parser = ArgumentParser()
-    arg_parser.add_argument("-s", "--silent", help="suppresses stdout (for Splunk scripted inputs)", action="store_true")
-    script_args = arg_parser.parse_args()
+    # Command line arguments.
+    arg_parser = ArgumentParser(add_help=False)
+    arg_parser.add_argument("-s", "--silent", help="silent mode (suppresses stdout for Splunk scripted inputs)", action="store_true")
+    arg_parser.add_argument("-t", "--test", help="test mode (typically send only to the main index)", action="store_true")
+    arg_parser.add_argument("-S", "--sample", help="sample mode (typically reduces the number of API calls)", action="store_true")
+    partial_script_args = arg_parser.parse_known_args()[0]
 
-    return script_args
+    return arg_parser, partial_script_args
 
 def configure_logger():
     # https://stackoverflow.com/a/57820456/1150923
@@ -249,7 +241,7 @@ def configure_logger():
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
 
-    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (pathname) (message)")
+    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (pathname) (lineno) (funcName) (message)")
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
@@ -269,16 +261,16 @@ def configure_logger():
 
     logger.setLevel(logging.DEBUG)
     logger.addHandler(file_handler)
-    if not script_args.silent:
+    if not partial_script_args.silent:
         logger.addHandler(console_handler)
 
 session_id = token_urlsafe(8)
+print("Session id: {}".format(session_id))
 start_time = time()
 config = get_config()
-debug = config["general"]["debug"]
-script_args = get_script_args()
+arg_parser, partial_script_args = get_script_args()
 
-if script_args.silent:
+if partial_script_args.silent:
     sys.stdout = StringIO()
 
 logger = logging.getLogger(__name__)

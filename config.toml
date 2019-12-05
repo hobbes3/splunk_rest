@@ -4,8 +4,6 @@
 # Therefore, for example, /opt/splunk/etc/apps/my_app/bin/config.ini will override values in /opt/splunk/etc/apps/my_app/bin/splunk_rest/config.ini (this file).
 
 [general]
-# Optional variable for your convienence.
-debug = false
 # Number of threads to create for multiprocessing.
 threads = 8
 
