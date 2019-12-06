@@ -203,15 +203,31 @@ def get_config():
 
     return config
 
-def get_script_args():
+def get_partial_script_args():
     # Command line arguments.
     arg_parser = ArgumentParser(add_help=False)
-    arg_parser.add_argument("-s", "--silent", help="silent mode (suppresses stdout for Splunk scripted inputs)", action="store_true")
-    arg_parser.add_argument("-t", "--test", help="test mode (typically send only to the main index)", action="store_true")
-    arg_parser.add_argument("-S", "--sample", help="sample mode (typically reduces the number of API calls)", action="store_true")
+    arg_parser.add_argument("--silent", action="store_true", help="silent mode (suppresses stdout for Splunk scripted inputs)")
+    arg_parser.add_argument("--test", action="store_true", help="test mode (typically send only to the main index)")
+    arg_parser.add_argument("--sample", action="store_true", help="sample mode (typically reduces the number of API calls)")
     partial_script_args = arg_parser.parse_known_args()[0]
 
     return arg_parser, partial_script_args
+
+def get_script_args():
+    # Manually create the default help message since using parse_known_args() won't capture additional arguments created by the main script.
+    arg_parser.add_argument("--help", action="store_true", help="show this help message and exit")
+    script_args = arg_parser.parse_args()
+
+    if script_args.help:
+        arg_parser.print_help()
+        sys.exit()
+
+    logger.debug("Command line arguments.", extra=vars(script_args))
+
+    print("Log file at {}.".format(log_file))
+    print("Session id: {}".format(session_id))
+
+    return script_args
 
 def configure_logger():
     # https://stackoverflow.com/a/57820456/1150923
@@ -235,8 +251,6 @@ def configure_logger():
     # Save logs the Splunk directory to be picked up by `index=_internal`.
     splunk_home = config["logging"]["splunk_home"]
     log_file = Path(splunk_home + "/var/log/splunk/" + parent_filename + ".log")
-
-    print("Log file at {}.".format(log_file))
 
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
@@ -264,16 +278,17 @@ def configure_logger():
     if not partial_script_args.silent:
         logger.addHandler(console_handler)
 
+    return log_file
+
 session_id = token_urlsafe(8)
-print("Session id: {}".format(session_id))
 start_time = time()
 config = get_config()
-arg_parser, partial_script_args = get_script_args()
+arg_parser, partial_script_args = get_partial_script_args()
 
 if partial_script_args.silent:
     sys.stdout = StringIO()
 
 logger = logging.getLogger(__name__)
-configure_logger()
+log_file = configure_logger()
 
 pool = Pool(config["general"]["threads"])
