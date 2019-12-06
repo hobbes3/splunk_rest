@@ -255,7 +255,7 @@ def configure_logger():
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
 
-    json_format = jsonlogger.JsonFormatter("(asctime) (levelname) (threadName) (session_id) (pathname) (lineno) (funcName) (message)")
+    json_format = jsonlogger.JsonFormatter("%(asctime)%(levelname)%(threadName)%(session_id)%(pathname)%(lineno)%(funcName)%(message)")
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
