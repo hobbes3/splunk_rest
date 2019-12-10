@@ -254,7 +254,6 @@ def configure_logger(session_id, script_args):
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
         record.session_id = session_id
-        record.arguments = vars(script_args)
         return record
 
     # https://stackoverflow.com/a/8163115/1150923
@@ -276,7 +275,7 @@ def configure_logger(session_id, script_args):
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
 
-    json_format = jsonlogger.JsonFormatter("%(asctime)%(levelname)%(threadName)%(session_id)%(pathname)%(arguments)%(lineno)%(funcName)%(message)")
+    json_format = jsonlogger.JsonFormatter("%(asctime)%(levelname)%(threadName)%(session_id)%(pathname)%(lineno)%(funcName)%(message)")
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
