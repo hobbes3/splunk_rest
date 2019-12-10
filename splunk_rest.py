@@ -25,9 +25,24 @@ from requests.packages.urllib3.util.retry import Retry
 from multiprocessing import Lock
 from multiprocessing.dummy import Pool
 
-def rest_wrapped(func):
+def try_response(func):
+    @wraps(func)
+    def wrapper(r, *args, **kwargs):
+        try:
+            func(r, *args, **kwargs)
+        except:
+            logger.warning("", exc_info=True, extra={"request_id": r.request_id})
+
+    return wrapper
+
+def splunk_rest(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
+        def gracefully_exit():
+            with lock:
+                logger.error("Script incomplete!", extra={"script_elapsed_sec": time() - start_time})
+                os._exit(1)
+
         try:
             print("Press ctrl-c to cancel at any time.")
             logger.info("Script start.")
@@ -44,15 +59,16 @@ def rest_wrapped(func):
             func(*args, **kwargs)
 
             pool.close()
+            pool.join()
         except KeyboardInterrupt:
             logger.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
             pool.terminate()
-
-            with lock:
-                logger.error("Script incomplete!", extra={"script_elapsed_sec": time() - start_time})
-                os._exit(1)
-        finally:
             pool.join()
+            gracefully_exit()
+        except:
+            pool.terminate()
+            pool.join()
+            gracefully_exit()
 
         logger.info("Script done!", extra={"script_elapsed_sec": time() - start_time})
 
@@ -124,9 +140,8 @@ class RetrySession(requests.Session):
             r = super().request(method, url, **kwargs)
         except:
             logger.warning("", exc_info=True, extra=meta)
-        finally:
+        else:
             m = meta.copy()
-            m["request_elapsed_sec"] = time() - request_start_time
             m["response"] = {
                 "ok": r.ok,
                 "encoding": r.encoding,
@@ -141,7 +156,11 @@ class RetrySession(requests.Session):
                 "url": r.url,
             }
 
-            if hasattr(r, "text"):
+            if r.status_code != 200:
+                logger.warning("Response received, but with non-OK status code!", extra=m)
+            elif not hasattr(r, "text"):
+                logger.warning("Response received, but with empty text!", extra=m)
+            else:
                 data_size = len(r.text)
                 m["response"]["data_size"] = data_size
                 if data_size <= text_truncate:
@@ -150,14 +169,13 @@ class RetrySession(requests.Session):
                 else:
                     m["response"]["data"] = r.text[:text_truncate]+" ..."
                     m["response"]["data_truncated"] = True
-            else:
-                logger.warning("Empty response received!", extra=m)
 
-            if r.status_code == 200:
-                logger.debug("Response received.", extra=m)
-            else:
-                logger.warning("Response received but with non-OK status code!", extra=m)
+                logger.debug("Reponse received.", extra=m)
 
+        finally:
+            m = meta.copy()
+            m["elapsed_time"] = time() - request_start_time
+            logger.debug("", extra=m)
             r.request_id = request_id
 
             return r
@@ -206,7 +224,7 @@ def get_config():
 def get_partial_script_args():
     # Command line arguments.
     arg_parser = ArgumentParser(add_help=False)
-    arg_parser.add_argument("--silent", action="store_true", help="silent mode (suppresses stdout for Splunk scripted inputs)")
+    arg_parser.add_argument("--silent", action="store_true", help="silent mode (suppresses all output for Splunk scripted inputs)")
     arg_parser.add_argument("--test", action="store_true", help="test mode (typically send only to the main index)")
     arg_parser.add_argument("--sample", action="store_true", help="sample mode (typically reduces the number of API calls)")
     partial_script_args = arg_parser.parse_known_args()[0]
@@ -215,7 +233,7 @@ def get_partial_script_args():
 
 def get_script_args():
     # Manually create the default help message since using parse_known_args() won't capture additional arguments created by the main script.
-    arg_parser.add_argument("--help", action="store_true", help="show this help message and exit")
+    arg_parser.add_argument("-h", "--help", action="store_true", help="show this help message and exit")
     script_args = arg_parser.parse_args()
 
     if script_args.help:
