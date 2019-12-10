@@ -27,11 +27,19 @@ from multiprocessing.dummy import Pool
 
 def try_response(func):
     @wraps(func)
-    def wrapper(r, *args, **kwargs):
+    def wrapper(r, *args, extra=None, **kwargs):
         try:
-            func(r, *args, **kwargs)
+            result = func(r, *args, extra=None, **kwargs)
         except:
-            logger.warning("", exc_info=True, extra={"request_id": r.request_id})
+            if extra and isinstance(extra, dict):
+                meta = extra
+            else:
+                meta = {"request_id": r.request_id}
+            logger.warning("An exception occured!", exc_info=True, extra=meta)
+
+            return None
+        else:
+            return result
 
     return wrapper
 
@@ -49,11 +57,6 @@ def splunk_rest(func):
 
             lock = Lock()
 
-            if partial_script_args.test:
-                logger.info("Test mode is on!")
-            if partial_script_args.sample:
-                logger.info("Sample mode is on!")
-
             requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
             func(*args, **kwargs)
@@ -66,7 +69,7 @@ def splunk_rest(func):
             pool.join()
             gracefully_exit()
         except:
-            logger.warning("", exc_info=True)
+            logger.warning("An exception occured!", exc_info=True)
             pool.terminate()
             pool.join()
             gracefully_exit()
@@ -140,7 +143,7 @@ class RetrySession(requests.Session):
 
             r = super().request(method, url, **kwargs)
         except:
-            logger.warning("", exc_info=True, extra=meta)
+            logger.warning("An exception occured!", exc_info=True, extra=meta)
         else:
             m = meta.copy()
             m["response"] = {
@@ -176,7 +179,7 @@ class RetrySession(requests.Session):
         finally:
             m = meta.copy()
             m["elapsed_time"] = time() - request_start_time
-            logger.debug("", extra=m)
+            logger.debug("Request completed.", extra=m)
             r.request_id = request_id
 
             return r
