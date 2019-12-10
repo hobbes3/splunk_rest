@@ -222,18 +222,19 @@ def get_script_args():
         arg_parser.print_help()
         sys.exit()
 
-    logger.debug("Command line arguments.", extra=vars(script_args))
+    log_file = configure_logger(session_id, script_args)
 
     print("Log file at {}.".format(log_file))
     print("Session id: {}".format(session_id))
 
     return script_args
 
-def configure_logger():
+def configure_logger(session_id, script_args):
     # https://stackoverflow.com/a/57820456/1150923
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
         record.session_id = session_id
+        record.arguments = vars(script_args)
         return record
 
     # https://stackoverflow.com/a/8163115/1150923
@@ -255,7 +256,7 @@ def configure_logger():
     old_factory = logging.getLogRecordFactory()
     logging.setLogRecordFactory(record_factory)
 
-    json_format = jsonlogger.JsonFormatter("%(asctime)%(levelname)%(threadName)%(session_id)%(pathname)%(lineno)%(funcName)%(message)")
+    json_format = jsonlogger.JsonFormatter("%(asctime)%(levelname)%(threadName)%(session_id)%(pathname)%(arguments)%(lineno)%(funcName)%(message)")
     std_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Logging to rotated files for Splunk.
@@ -289,6 +290,5 @@ if partial_script_args.silent:
     sys.stdout = StringIO()
 
 logger = logging.getLogger(__name__)
-log_file = configure_logger()
 
 pool = Pool(config["general"]["threads"])
