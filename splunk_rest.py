@@ -66,6 +66,7 @@ def splunk_rest(func):
             pool.join()
             gracefully_exit()
         except:
+            logger.warning("", exc_info=True)
             pool.terminate()
             pool.join()
             gracefully_exit()
@@ -240,7 +241,7 @@ def get_script_args():
         arg_parser.print_help()
         sys.exit()
 
-    logger.debug("Command line arguments.", extra=vars(script_args))
+    logger.debug("Command line arguments.", extra={"arguments": vars(script_args)})
 
     print("Log file at {}.".format(log_file))
     print("Session id: {}".format(session_id))
