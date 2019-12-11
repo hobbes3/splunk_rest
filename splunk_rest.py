@@ -22,8 +22,22 @@ from secrets import token_urlsafe
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from requests.packages.urllib3.util.retry import Retry
-from multiprocessing import Lock
+from multiprocessing import RawValue, Lock
 from multiprocessing.dummy import Pool
+
+# https://stackoverflow.com/a/47562583/1150923
+class Counter(object):
+    def __init__(self, initval=0):
+        self.val = RawValue('i', initval)
+        self.lock = Lock()
+
+    def increment(self):
+        with self.lock:
+            self.val.value += 1
+
+    @property
+    def value(self):
+        return self.val.value
 
 def try_response(func):
     @wraps(func)
@@ -35,7 +49,8 @@ def try_response(func):
                 meta = extra
             else:
                 meta = {"request_id": r.request_id}
-            logger.warning("An exception occured!", exc_info=True, extra=meta)
+            logger.warning("An exception occured!", extra=meta, exc_info=True)
+            count_error.increment()
 
             return None
         else:
@@ -46,10 +61,9 @@ def try_response(func):
 def splunk_rest(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        def gracefully_exit():
-            with lock:
-                logger.error("Script incomplete!", extra={"script_elapsed_sec": time() - start_time})
-                os._exit(1)
+        def show_exception_count():
+            if count_error.value > 0:
+                print("Had {} exceptions!".format(count_error.value))
 
         try:
             print("Press ctrl-c to cancel at any time.")
@@ -67,14 +81,13 @@ def splunk_rest(func):
             logger.error("Caught KeyboardInterrupt! Cleaning up and terminating workers. Please wait...")
             pool.terminate()
             pool.join()
-            gracefully_exit()
-        except:
-            logger.warning("An exception occured!", exc_info=True)
-            pool.terminate()
-            pool.join()
-            gracefully_exit()
+            with lock:
+                logger.error("Script incomplete!", extra={"script_elapsed_sec": time() - start_time})
+                show_exception_count()
+                os._exit(1)
 
         logger.info("Script done!", extra={"script_elapsed_sec": time() - start_time})
+        show_exception_count()
 
     return wrapper
 
@@ -143,7 +156,8 @@ class RetrySession(requests.Session):
 
             r = super().request(method, url, **kwargs)
         except:
-            logger.warning("An exception occured!", exc_info=True, extra=meta)
+            logger.warning("An exception occured!", extra=meta, exc_info=True)
+            count_error.increment()
         else:
             m = meta.copy()
             m["response"] = {
@@ -314,3 +328,4 @@ if partial_script_args.silent:
 logger = logging.getLogger(__name__)
 
 pool = Pool(config["general"]["threads"])
+count_error = Counter(0)
