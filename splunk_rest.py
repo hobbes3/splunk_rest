@@ -41,10 +41,11 @@ class Counter(object):
 
 def try_response(func):
     @wraps(func)
-    def wrapper(r, *args, extra=None, **kwargs):
+    def wrapper(r, *args, **kwargs):
         try:
-            result = func(r, *args, extra=None, **kwargs)
+            result = func(r, *args, **kwargs)
         except:
+            extra = kwargs.get("extra", None)
             if extra and isinstance(extra, dict):
                 meta = extra
             else:
